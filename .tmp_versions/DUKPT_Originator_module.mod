@@ -1,0 +1,3 @@
+/home/jasonshiao/Documents/kernel_modules/DUKPT_Key_Management_Module/DUKPT_Originator_module.ko
+/home/jasonshiao/Documents/kernel_modules/DUKPT_Key_Management_Module/DUKPT_Originator.o /home/jasonshiao/Documents/kernel_modules/DUKPT_Key_Management_Module/DES.o /home/jasonshiao/Documents/kernel_modules/DUKPT_Key_Management_Module/DUKPT.o /home/jasonshiao/Documents/kernel_modules/DUKPT_Key_Management_Module/TDES.o
+
