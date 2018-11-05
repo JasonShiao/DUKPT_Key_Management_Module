@@ -18,12 +18,21 @@
 #include <linux/device.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/ioctl.h>
 
 #include <linux/string.h>
 #include <linux/unistd.h>
 
 #include "DES.h"
 #include "DUKPT.h"
+
+#define IOCTL_MAGIC 70
+
+#define LOAD_INITIAL_KEY_IPEK _IOW(IOCTL_MAGIC, 0, char*)
+#define LOAD_INITIAL_KEY_KSN _IOW(IOCTL_MAGIC, 1, char*)
+#define REQUEST_PIN_ENTRY _IOW(IOCTL_MAGIC, 2, char*)
+#define CANCEL_PIN_ENTRY _IO(IOCTL_MAGIC, 3)
+#define POWER_ON_RESET _IO(IOCTL_MAGIC, 4)
 
 
 
@@ -33,16 +42,13 @@ dev_t dev = 0;
 static struct class *dev_class;
 static struct cdev DUKPT_cdev;
 uint8_t *kernel_buffer;
+static uint8_t* ioctl_buffer;
 
 
 typedef enum {READY, ACTIVE, EXIT}ReadStateType; 
 ReadStateType read_state = READY;
 
 static DUKPT_Reg *DUKPT_Instance;
-static uint8_t KSN[10]; // Key Serial Number
-static uint64_t BDK[2]; // Base Derivation Key
-static uint64_t IPEK[2]; // Initial PIN encryption Key
-
 
 /*   Function Prototype   */
 
@@ -54,13 +60,16 @@ static int device_release(struct inode *inode, struct file *file);
 static ssize_t device_read(struct file *filp, char __user *buf, size_t len, loff_t *off);
 static ssize_t device_write(struct file *filp, const char __user *buf, size_t len, loff_t *off);
 
+static long device_ioctl(struct file* file, unsigned int cmd, unsigned long arg);
+
 static struct file_operations fops =
 {
-	.owner		= THIS_MODULE,
-	.read		= device_read,
-	.write		= device_write,
-	.open		= device_open,
-	.release	= device_release,
+	.owner			= THIS_MODULE,
+	.read			= device_read,
+	.write			= device_write,
+	.open			= device_open,
+	.unlocked_ioctl	= device_ioctl, 
+	.release		= device_release,
 };
 
 static int device_open(struct inode *inode, struct file *file)
@@ -125,11 +134,6 @@ static ssize_t device_read(struct file *file, char __user *buf, size_t len, loff
 		read_state = ACTIVE;
 	}
 
-	//printk(KERN_INFO "strlen of kernel_buffer = %zu\n", strlen(kernel_buffer));
-	//printk(KERN_INFO "off = %lld\n", *off);
-	//printk(KERN_INFO "bytes_read = %zu\n", bytes_read);
-	//printk(KERN_INFO "strlen of kernel_buffer - off = %lld\n", strlen(kernel_buffer) - *off);
-
 	return bytes_read;
 
 }
@@ -191,11 +195,227 @@ static ssize_t device_write(struct file *file, const char __user *buf, size_t le
 	return len;
 }
 
+static long device_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
+{
+	size_t i;
+	uint64_t temp_half_IPEK;
+	uint64_t temp_PIN_field;
+	int ret;
+
+	switch(cmd)
+	{
+		case LOAD_INITIAL_KEY_IPEK:
+
+			copy_from_user(ioctl_buffer, (char*)arg, 32);
+			ioctl_buffer[32] = '\0';
+			/* Left half */
+			temp_half_IPEK = 0;
+			for(i = 0; i < 16; i++)
+			{
+				temp_half_IPEK <<= 4;
+				if(ioctl_buffer[i] >= '0' && ioctl_buffer[i] <= '9')
+					temp_half_IPEK |= (ioctl_buffer[i] - '0');
+				else if(ioctl_buffer[i] >= 'a' && ioctl_buffer[i] <= 'z')
+					temp_half_IPEK |= (ioctl_buffer[i] - 'a' + 10);
+				else if(ioctl_buffer[i] >= 'A' && ioctl_buffer[i] <= 'Z')
+					temp_half_IPEK |= (ioctl_buffer[i] - 'A' + 10);
+				else
+					return -EINVAL;
+			}
+			DUKPT_Instance->FKReg[20].LeftHalf = temp_half_IPEK;
+
+			/* Right half */
+			temp_half_IPEK = 0;
+			for(i = 16; i < 32; i++)
+			{
+				temp_half_IPEK <<= 4;
+				if(ioctl_buffer[i] >= '0' && ioctl_buffer[i] <= '9')
+					temp_half_IPEK |= (ioctl_buffer[i] - '0');
+				else if(ioctl_buffer[i] >= 'a' && ioctl_buffer[i] <= 'z')
+					temp_half_IPEK |= (ioctl_buffer[i] - 'a' + 10);
+				else if(ioctl_buffer[i] >= 'A' && ioctl_buffer[i] <= 'Z')
+					temp_half_IPEK |= (ioctl_buffer[i] - 'A' + 10);
+				else
+					return -EINVAL;
+			}
+			DUKPT_Instance->FKReg[20].RightHalf = temp_half_IPEK;
+
+			printk(KERN_INFO "IPEK = %016llX %016llX loaded ...done\n",
+								DUKPT_Instance->FKReg[20].LeftHalf, 
+								DUKPT_Instance->FKReg[20].RightHalf);
+
+			GenerateLRC(&(DUKPT_Instance->FKReg[20]));
+			DUKPT_Instance->CurrentKeyPtr = &DUKPT_Instance->FKReg[20];
+
+			
+			return 0;
+			break;
+		case LOAD_INITIAL_KEY_KSN:
+		
+			copy_from_user(ioctl_buffer, (char*)arg, 20);
+			for(i=0; i<10; i++)
+			{
+				if(ioctl_buffer[2*i] >= '0' && ioctl_buffer[2*i] <= '9')
+					DUKPT_Instance->KSNReg[i] = (ioctl_buffer[2*i] - '0') << 4;
+				else if(ioctl_buffer[2*i] >= 'a' && ioctl_buffer[2*i] <= 'z')
+					DUKPT_Instance->KSNReg[i] = (ioctl_buffer[2*i] - 'a' + 10) << 4;
+				else if(ioctl_buffer[2*i] >= 'A' && ioctl_buffer[2*i] <= 'Z')
+					DUKPT_Instance->KSNReg[i] = (ioctl_buffer[2*i] - 'A' + 10) << 4;
+				else
+					return -EINVAL;
+				
+				if(ioctl_buffer[2*i+1] >= '0' && ioctl_buffer[2*i+1] <= '9')
+					DUKPT_Instance->KSNReg[i] |= (ioctl_buffer[2*i+1] - '0');
+				else if(ioctl_buffer[2*i+1] >= 'a' && ioctl_buffer[2*i+1] <= 'z')
+					DUKPT_Instance->KSNReg[i] |= (ioctl_buffer[2*i+1] - 'a' + 10);
+				else if(ioctl_buffer[2*i+1] >= 'A' && ioctl_buffer[2*i+1] <= 'Z')
+					DUKPT_Instance->KSNReg[i] |= (ioctl_buffer[2*i+1] - 'A' + 10);
+				else
+					return -EINVAL;
+
+			}
+
+			printk(KERN_INFO "KSN = %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X loaded ...done\n",
+									DUKPT_Instance->KSNReg[0], DUKPT_Instance->KSNReg[1], 
+									DUKPT_Instance->KSNReg[2], DUKPT_Instance->KSNReg[3],
+									DUKPT_Instance->KSNReg[4], DUKPT_Instance->KSNReg[5], 
+									DUKPT_Instance->KSNReg[6], DUKPT_Instance->KSNReg[7], 
+									DUKPT_Instance->KSNReg[8], DUKPT_Instance->KSNReg[9]);
+
+			/* Clear Encryption Counter (right-most 21 bits) */
+			DUKPT_Instance->KSNReg[9] = DUKPT_Instance->KSNReg[9] & (uint8_t)0x0;
+			DUKPT_Instance->KSNReg[8] = DUKPT_Instance->KSNReg[8] & (uint8_t)0x0;
+			DUKPT_Instance->KSNReg[7] = DUKPT_Instance->KSNReg[7] & (uint8_t)0xE0;
+
+
+			/* Set #1 bit (leftmost bit) of ShiftReg to 1 */
+			DUKPT_Instance->ShiftReg = (uint64_t)(0x1) << 20;
+
+			do
+			{
+				NewKey_3(DUKPT_Instance);
+				ret = NewKey_1(DUKPT_Instance);
+			}while(ret == 0);
+
+			NewKey_4(DUKPT_Instance);
+
+			ret = NewKey_2(DUKPT_Instance);
+
+			if(ret == 1)
+			{
+				/* TODO:cease operation */
+				DUKPT_Instance->current_state = DUKPT_OVERFLOW;
+				return 0;
+			}
+
+			//Exit();
+
+			DUKPT_Instance->current_state = DUKPT_ACTIVE;
+
+			return 0;
+			break;
+		case REQUEST_PIN_ENTRY:
+
+			if(DUKPT_Instance->current_state == DUKPT_OVERFLOW)
+			{
+				printk(KERN_INFO "DUKPT overflows. Please initialize it with a new key/\n");
+				return 0;
+			}
+
+			
+			copy_from_user(ioctl_buffer, (char*)arg, 16);
+			/* input: right-most 12 digits(nibbles) of PAN */
+			DUKPT_Instance->AccountReg = 0;
+			for(i = 0 ; i < 16; i++)
+			{
+				DUKPT_Instance->AccountReg <<= 4;
+				if(ioctl_buffer[i] >= '0' && ioctl_buffer[i] <= '9')
+					DUKPT_Instance->AccountReg |= (ioctl_buffer[i] - '0');
+				else if(ioctl_buffer[i] >= 'a' && ioctl_buffer[i] <= 'z')
+					DUKPT_Instance->AccountReg |= (ioctl_buffer[i] - 'a' + 10);
+				else if(ioctl_buffer[i] >= 'A' && ioctl_buffer[i] <= 'Z')
+					DUKPT_Instance->AccountReg |= (ioctl_buffer[i] - 'A' + 10);
+				else
+					return -EINVAL;
+			}
+			printk(KERN_INFO "Account Reg: %016llX\n", DUKPT_Instance->AccountReg);
+			
+
+			/* TODO: Enable a keypad/keyboard for PIN entry */
+			temp_PIN_field = 0x041234FFFFFFFFFF; /* Directly assign here for demo/test */
+
+
+			DUKPT_Instance->CryptoReg[0] = temp_PIN_field ^ DUKPT_Instance->AccountReg;
+
+			printk(KERN_INFO "PIN Block: %016llX\n", DUKPT_Instance->CryptoReg[0]);
+
+
+			do
+			{
+				ret = Request_PIN_Entry_1(DUKPT_Instance);
+			}while(ret == 0);
+
+			if(ret == 2)
+			{
+				/* TODO: Cease Operation */
+				DUKPT_Instance->current_state = DUKPT_OVERFLOW;
+				return 0;
+			}
+
+			Request_PIN_Entry_2(DUKPT_Instance);
+
+			ret = NewKey(DUKPT_Instance);
+
+			if(ret == 1)
+			{
+				ret = NewKey_1(DUKPT_Instance);
+				while(ret == 0)
+				{
+					NewKey_3(DUKPT_Instance);
+					ret = NewKey_1(DUKPT_Instance);
+				}
+				NewKey_4(DUKPT_Instance);
+			}
+				
+			ret = NewKey_2(DUKPT_Instance);
+
+			if(ret == 1)
+			{
+				/* TODO:Cease operation */
+				DUKPT_Instance->current_state = DUKPT_OVERFLOW;
+			}
+
+			//Exit();
+				
+			return 0;
+			break;
+		case CANCEL_PIN_ENTRY:
+			
+			/* TODO: Deactivate keypad/keyboard */
+			
+			//Exit();	
+			
+			return 0;
+			break;
+		case POWER_ON_RESET:
+		
+			return 0;
+			break;
+		default:
+			printk(KERN_DEBUG "%s Unknown command %d\n", __FUNCTION__, cmd);
+			return -EINVAL;
+			break;
+	}
+
+}
+
+
+
+
 
 
 static int __init DUKPT_Originator_init(void)
 {
-	int i;
 
 	/* Assign PIN Block Directly instead of calling Request PIN Entry */
 	
@@ -233,26 +453,26 @@ static int __init DUKPT_Originator_init(void)
 	}
 
 	/* Allocate DUKPT_Reg instance */
-	DUKPT_Instance = kmalloc(sizeof(DUKPT_Reg), GFP_NOWAIT);
-
+	DUKPT_Instance = kmalloc(sizeof(DUKPT_Reg), GFP_KERNEL);
+	ioctl_buffer = kmalloc(50, GFP_KERNEL);
 
 
 	/* Directly assign in program (for test) */
-	KSN[0] = 0xFF; KSN[1] = 0xFF; KSN[2] = 0x98; KSN[3] = 0x76;
-	KSN[4] = 0x54; KSN[5] = 0x32; KSN[6] = 0x10; KSN[7] = 0xE0;
-	KSN[8] = 0x00; KSN[9] = 0x00;
+	//KSN[0] = 0xFF; KSN[1] = 0xFF; KSN[2] = 0x98; KSN[3] = 0x76;
+	//KSN[4] = 0x54; KSN[5] = 0x32; KSN[6] = 0x10; KSN[7] = 0xE0;
+	//KSN[8] = 0x00; KSN[9] = 0x00;
 
-	BDK[0] = 0x0123456789ABCDEF;
-	BDK[1] = 0xFEDCBA9876543210;
+	//BDK[0] = 0x0123456789ABCDEF;
+	//BDK[1] = 0xFEDCBA9876543210;
 
-	IPEK[0] = 0x6AC292FAA1315B4D;
-	IPEK[1] = 0x858AB3A3D7D5933A;
-	// or use CalcIPEK(BDK, KSN, IPEK) to calculate IPEK from BDK and KSN;
+	//IPEK[0] = 0x6AC292FAA1315B4D;
+	//IPEK[1] = 0x858AB3A3D7D5933A;
+	// can use CalcIPEK(BDK, KSN, IPEK) to calculate IPEK from BDK and KSN;
 
-	printk(KERN_INFO "-------------------------------------------------\n");
-	printk(KERN_INFO "KSN = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n", KSN[0], KSN[1], KSN[2], KSN[3], KSN[4], KSN[5], KSN[6], KSN[7], KSN[8], KSN[9]);
-	printk(KERN_INFO "IPEK = %016llx %016llx\n", IPEK[0], IPEK[1]);
-	printk(KERN_INFO "-------------------------------------------------\n");
+	//printk(KERN_INFO "-------------------------------------------------\n");
+	//printk(KERN_INFO "KSN = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n", KSN[0], KSN[1], KSN[2], KSN[3], KSN[4], KSN[5], KSN[6], KSN[7], KSN[8], KSN[9]);
+	//printk(KERN_INFO "IPEK = %016llx %016llx\n", IPEK[0], IPEK[1]);
+	//printk(KERN_INFO "-------------------------------------------------\n");
 
 
 	
@@ -261,29 +481,29 @@ static int __init DUKPT_Originator_init(void)
 	/****************     Initialization Start     ******************/
 
 	/* Load Initial Key */
-	DUKPT_Instance->FKReg[20].LeftHalf = IPEK[0];
-	DUKPT_Instance->FKReg[20].RightHalf = IPEK[1];
+	//DUKPT_Instance->FKReg[20].LeftHalf = IPEK[0];
+	//DUKPT_Instance->FKReg[20].RightHalf = IPEK[1];
 
-	GenerateLRC(&(DUKPT_Instance->FKReg[20]));
-	DUKPT_Instance->CurrentKeyPtr = &DUKPT_Instance->FKReg[20];
+	//GenerateLRC(&(DUKPT_Instance->FKReg[20]));
+	//DUKPT_Instance->CurrentKeyPtr = &DUKPT_Instance->FKReg[20];
 
 
 
 	/* Set Key Serial Number Register */
-	for (i = 0; i < 10; i++)
-		DUKPT_Instance->KSNReg[i] = KSN[i];
+	//for (i = 0; i < 10; i++)
+	//	DUKPT_Instance->KSNReg[i] = KSN[i];
 
 	/* Clear Encryption Counter (right-most 21 bits) */
-	DUKPT_Instance->KSNReg[9] = DUKPT_Instance->KSNReg[9] & (uint8_t)0x0;
-	DUKPT_Instance->KSNReg[8] = DUKPT_Instance->KSNReg[8] & (uint8_t)0x0;
-	DUKPT_Instance->KSNReg[7] = DUKPT_Instance->KSNReg[7] & (uint8_t)0xE0;
+	//DUKPT_Instance->KSNReg[9] = DUKPT_Instance->KSNReg[9] & (uint8_t)0x0;
+	//DUKPT_Instance->KSNReg[8] = DUKPT_Instance->KSNReg[8] & (uint8_t)0x0;
+	//DUKPT_Instance->KSNReg[7] = DUKPT_Instance->KSNReg[7] & (uint8_t)0xE0;
 
 
 	/* Set #1 bit (leftmost bit) of ShiftReg to 1 */
-	DUKPT_Instance->ShiftReg = (uint64_t)(0x1) << 20;
+	//DUKPT_Instance->ShiftReg = (uint64_t)(0x1) << 20;
 
 
-	NewKey_3(DUKPT_Instance);
+	//NewKey_3(DUKPT_Instance);
 
 	/***************      Initialization Finished      ****************/
 
@@ -299,6 +519,7 @@ r_class:
 	unregister_chrdev_region(dev, 1);
 
 	kfree(DUKPT_Instance);
+	kfree(ioctl_buffer);
 
 	return -1;
 }

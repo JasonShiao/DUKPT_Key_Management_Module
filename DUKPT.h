@@ -10,9 +10,19 @@ typedef struct
 
 }FutureKey;
 
+typedef enum
+{
+	DUKPT_ACTIVE,
+	DUKPT_OVERFLOW
+}DUKPT_State;
+
 typedef struct
 {
-	uint8_t KSNReg[10];		// Key Serial Number Register
+	DUKPT_State current_state;
+
+	uint64_t AccountReg;
+
+	uint8_t KSNReg[10];		// Key Serial Number Register (59-bit + 21-bit)
 	FutureKey FKReg[21];	// Future Key Register 
 	uint64_t KeyReg[2];		// Key Register
 	uint64_t CryptoReg[2];	// Crypto Register
@@ -20,6 +30,8 @@ typedef struct
 	FutureKey *CurrentKeyPtr;	// Current Key Pointer (Point to element of Future Key Register)
 
 }DUKPT_Reg;
+
+
 
 uint64_t PINField_format0(char PIN[14+1]);
 uint64_t PANField_format0(char PAN[12+1]);
@@ -33,13 +45,13 @@ void generateKey(uint64_t key[2], uint64_t baseKSN);
 void NonReversibleKeyGen(DUKPT_Reg* DUKPT_Instance);
 
 void NewKey_3(DUKPT_Reg* DUKPT_Instance);
-void NewKey_1(DUKPT_Reg* DUKPT_Instance);
+int NewKey_1(DUKPT_Reg* DUKPT_Instance);
 void NewKey_4(DUKPT_Reg* DUKPT_Instance);
 int NewKey_2(DUKPT_Reg* DUKPT_Instance);
 
-void NewKey(DUKPT_Reg* DUKPT_Instance);
+int NewKey(DUKPT_Reg* DUKPT_Instance);
 
-void Request_PIN_Entry_1(DUKPT_Reg* DUKPT_Instance);
+int Request_PIN_Entry_1(DUKPT_Reg* DUKPT_Instance);
 void Request_PIN_Entry_2(DUKPT_Reg* DUKPT_Instance);
 
 void SetBit(DUKPT_Reg* DUKPT_Instance);

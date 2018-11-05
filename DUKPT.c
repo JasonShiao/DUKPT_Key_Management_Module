@@ -193,7 +193,7 @@ void NonReversibleKeyGen(DUKPT_Reg* DUKPT_Instance)
 }
 
 
-void NewKey(DUKPT_Reg *DUKPT_Instance)
+int NewKey(DUKPT_Reg *DUKPT_Instance)
 {
 	int oneCount = 0;
 	uint32_t EncryptCounter = 0x0;
@@ -213,7 +213,8 @@ void NewKey(DUKPT_Reg *DUKPT_Instance)
 
 	if (oneCount < 10)
 	{
-		NewKey_1(DUKPT_Instance);
+		/* NewKey_1 */
+		return 1;
 	}
 	else
 	{
@@ -228,7 +229,8 @@ void NewKey(DUKPT_Reg *DUKPT_Instance)
 		DUKPT_Instance->KSNReg[8] = (uint8_t)(EncryptCounter >> 8);
 		DUKPT_Instance->KSNReg[9] = (uint8_t)(EncryptCounter);
 
-		NewKey_2(DUKPT_Instance);
+		/* NewKey_2 */
+		return 2;
 	}
 
 }
@@ -268,24 +270,22 @@ void NewKey_3(DUKPT_Reg *DUKPT_Instance)
 	}
 
 	//printDUKPTStateSummary(DUKPT_Instance);
-	
-	NewKey_1(DUKPT_Instance);
 
 }
 
-void NewKey_1(DUKPT_Reg *DUKPT_Instance)
+int NewKey_1(DUKPT_Reg *DUKPT_Instance)
 {
 
 	DUKPT_Instance->ShiftReg >>= 1;
 	if (DUKPT_Instance->ShiftReg == (uint64_t)0x0)
 	{
 		/* go to NewKey-4 */
-		NewKey_4(DUKPT_Instance);
+		return 1;
 	}
 	else
 	{
-		/* go to NewKey-3 again */
-		NewKey_3(DUKPT_Instance);
+		/* go back to NewKey-3 again */
+		return 0;
 	}
 }
 
@@ -331,7 +331,7 @@ void NewKey_4(DUKPT_Reg *DUKPT_Instance)
 	NewKey_2(DUKPT_Instance);
 }
 
-void Request_PIN_Entry_1(DUKPT_Reg* DUKPT_Instance)
+int Request_PIN_Entry_1(DUKPT_Reg* DUKPT_Instance)
 {
 	
 	int positionShiftReg = 0;
@@ -353,7 +353,7 @@ void Request_PIN_Entry_1(DUKPT_Reg* DUKPT_Instance)
 	{
 		/****** LRC check passed  ******/
 		/* Request PIN Entry 2 */
-		Request_PIN_Entry_2(DUKPT_Instance);
+		return 1;
 	}
 	else
 	{
@@ -375,11 +375,12 @@ void Request_PIN_Entry_1(DUKPT_Reg* DUKPT_Instance)
 		if (EncryptCounter == 0)
 		{
 			/* Cease Operation: more than 1 million PINs have been encrypted */
-			return;
+			return 2;
 		}
 		else 
 		{
-			Request_PIN_Entry_1(DUKPT_Instance); // Recursive
+			/* Request_PIN_Entry_1 again */
+			return 0;
 		}
 	}
 
@@ -400,10 +401,11 @@ void Request_PIN_Entry_2(DUKPT_Reg* DUKPT_Instance)
 	DUKPT_Instance->CryptoReg[0] = DES_Decrypt(DUKPT_Instance->CryptoReg[0], DUKPT_Instance->KeyReg[1]);
 	DUKPT_Instance->CryptoReg[0] = DES_Encrypt(DUKPT_Instance->CryptoReg[0], DUKPT_Instance->KeyReg[0]);
 
+	/* TODO: Send transaction message to somewhere */
+
 	/* Format and transmit encrypted PIN Block */
 	printk(KERN_INFO "=======================================================\n");
 	printk(KERN_INFO "                   Transaction Message                 \n");
-	printk(KERN_INFO "=======================================================\n");
 	printk(KERN_INFO "KSN = %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n", 
 						DUKPT_Instance->KSNReg[0], DUKPT_Instance->KSNReg[1], 
 						DUKPT_Instance->KSNReg[2], DUKPT_Instance->KSNReg[3], 
@@ -411,10 +413,8 @@ void Request_PIN_Entry_2(DUKPT_Reg* DUKPT_Instance)
 						DUKPT_Instance->KSNReg[6], DUKPT_Instance->KSNReg[7], 
 						DUKPT_Instance->KSNReg[8], DUKPT_Instance->KSNReg[9]);
 	printk(KERN_INFO "Encrypted PIN Block: %016llX\n", DUKPT_Instance->CryptoReg[0]);
-
-	/* New Key */
-	//NewKey(DUKPT_Instance);
-
+	printk(KERN_INFO "=======================================================\n");
+	
 	//printDUKPTStateSummary(DUKPT_Instance);
 }
 
