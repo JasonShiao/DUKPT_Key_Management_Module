@@ -26,6 +26,8 @@
 #include "DES.h"
 #include "DUKPT.h"
 
+#define MAX_TRANSACTION_DATA_LEN 400
+
 #define IOCTL_MAGIC 70
 
 #define LOAD_INITIAL_KEY_IPEK _IOW(IOCTL_MAGIC, 0, char*)
@@ -34,15 +36,21 @@
 #define CANCEL_PIN_ENTRY _IO(IOCTL_MAGIC, 3)
 #define POWER_ON_RESET _IO(IOCTL_MAGIC, 4)
 
-
+#define SET_CLEAR_DATA _IOW(IOCTL_MAGIC, 5, char*)
+#define GET_ENCRYPT_DATA _IOR(IOCTL_MAGIC, 6)
 
 
 /*   Global Variable   */
-dev_t dev = 0;
+dev_t DUKPT_cmd_dev = 0;
+dev_t DUKPT_data_dev = 0;
 static struct class *dev_class;
-static struct cdev DUKPT_cdev;
+static struct cdev DUKPT_cmd_cdev;
+static struct cdev DUKPT_data_cdev;
+
+
 uint8_t *kernel_buffer;
-static uint8_t* ioctl_buffer;
+static uint8_t* DUKPT_cmd_buffer;
+static uint8_t* DUKPT_data_buffer;
 
 
 typedef enum {READY, ACTIVE, EXIT}ReadStateType; 
@@ -55,28 +63,33 @@ static DUKPT_Reg *DUKPT_Instance;
 static int __init DUKPT_Originator_init(void);
 static void __exit DUKPT_Originator_exit(void);
 
-static int device_open(struct inode *inode, struct file *file);
-static int device_release(struct inode *inode, struct file *file);
-static ssize_t device_read(struct file *filp, char __user *buf, size_t len, loff_t *off);
-static ssize_t device_write(struct file *filp, const char __user *buf, size_t len, loff_t *off);
+static int DUKPT_cmd_open(struct inode *inode, struct file *file);
+static int DUKPT_cmd_release(struct inode *inode, struct file *file);
+static ssize_t DUKPT_cmd_read(struct file *filp, char __user *buf, size_t len, loff_t *off);
+static ssize_t DUKPT_cmd_write(struct file *filp, const char __user *buf, size_t len, loff_t *off);
+static long DUKPT_cmd_ioctl(struct file* file, unsigned int cmd, unsigned long arg);
 
-static long device_ioctl(struct file* file, unsigned int cmd, unsigned long arg);
+static int DUKPT_data_open(struct inode *inode, struct file *file);
+static int DUKPT_data_release(struct inode *inode, struct file *file);
+static ssize_t DUKPT_data_read(struct file *filp, char __user *buf, size_t len, loff_t *off);
+static ssize_t DUKPT_data_write(struct file *filp, const char __user *buf, size_t len, loff_t *off);
+static long DUKPT_data_ioctl(struct file* file, unsigned int cmd, unsigned long arg);
 
-static struct file_operations fops =
+static struct file_operations DUKPT_cmd_fops =
 {
 	.owner			= THIS_MODULE,
-	.read			= device_read,
-	.write			= device_write,
-	.open			= device_open,
-	.unlocked_ioctl	= device_ioctl, 
-	.release		= device_release,
+	.read			= DUKPT_cmd_read,
+	.write			= DUKPT_cmd_write,
+	.open			= DUKPT_cmd_open,
+	.unlocked_ioctl	= DUKPT_cmd_ioctl, 
+	.release		= DUKPT_cmd_release,
 };
 
-static int device_open(struct inode *inode, struct file *file)
+static int DUKPT_cmd_open(struct inode *inode, struct file *file)
 {
 
 	/* Create physical memory */
-	if((kernel_buffer = kmalloc(1024, GFP_KERNEL)) ==0)
+	if((kernel_buffer = kmalloc(1024, GFP_KERNEL)) == 0)
 	{
 		printk(KERN_INFO "Cannot allocate memory in kernel\n");
 		return -1;
@@ -85,14 +98,14 @@ static int device_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static int device_release(struct inode *inode, struct file *file)
+static int DUKPT_cmd_release(struct inode *inode, struct file *file)
 {
 	kfree(kernel_buffer);
 	printk(KERN_INFO "Device File Closed...!!!\n");
 	return 0;
 }
 
-static ssize_t device_read(struct file *file, char __user *buf, size_t len, loff_t *off)
+static ssize_t DUKPT_cmd_read(struct file *file, char __user *buf, size_t len, loff_t *off)
 {
 	
 	ssize_t bytes_read;
@@ -138,7 +151,7 @@ static ssize_t device_read(struct file *file, char __user *buf, size_t len, loff
 
 }
 
-static ssize_t device_write(struct file *file, const char __user *buf, size_t len, loff_t *off)
+static ssize_t DUKPT_cmd_write(struct file *file, const char __user *buf, size_t len, loff_t *off)
 {
 
 	size_t i;
@@ -195,7 +208,7 @@ static ssize_t device_write(struct file *file, const char __user *buf, size_t le
 	return len;
 }
 
-static long device_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
+static long DUKPT_cmd_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
 {
 	size_t i;
 	uint64_t temp_half_IPEK;
@@ -206,19 +219,19 @@ static long device_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
 	{
 		case LOAD_INITIAL_KEY_IPEK:
 
-			copy_from_user(ioctl_buffer, (char*)arg, 32);
-			ioctl_buffer[32] = '\0';
+			copy_from_user(DUKPT_cmd_buffer, (char*)arg, 32);
+			DUKPT_cmd_buffer[32] = '\0';
 			/* Left half */
 			temp_half_IPEK = 0;
 			for(i = 0; i < 16; i++)
 			{
 				temp_half_IPEK <<= 4;
-				if(ioctl_buffer[i] >= '0' && ioctl_buffer[i] <= '9')
-					temp_half_IPEK |= (ioctl_buffer[i] - '0');
-				else if(ioctl_buffer[i] >= 'a' && ioctl_buffer[i] <= 'z')
-					temp_half_IPEK |= (ioctl_buffer[i] - 'a' + 10);
-				else if(ioctl_buffer[i] >= 'A' && ioctl_buffer[i] <= 'Z')
-					temp_half_IPEK |= (ioctl_buffer[i] - 'A' + 10);
+				if(DUKPT_cmd_buffer[i] >= '0' && DUKPT_cmd_buffer[i] <= '9')
+					temp_half_IPEK |= (DUKPT_cmd_buffer[i] - '0');
+				else if(DUKPT_cmd_buffer[i] >= 'a' && DUKPT_cmd_buffer[i] <= 'z')
+					temp_half_IPEK |= (DUKPT_cmd_buffer[i] - 'a' + 10);
+				else if(DUKPT_cmd_buffer[i] >= 'A' && DUKPT_cmd_buffer[i] <= 'Z')
+					temp_half_IPEK |= (DUKPT_cmd_buffer[i] - 'A' + 10);
 				else
 					return -EINVAL;
 			}
@@ -229,12 +242,12 @@ static long device_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
 			for(i = 16; i < 32; i++)
 			{
 				temp_half_IPEK <<= 4;
-				if(ioctl_buffer[i] >= '0' && ioctl_buffer[i] <= '9')
-					temp_half_IPEK |= (ioctl_buffer[i] - '0');
-				else if(ioctl_buffer[i] >= 'a' && ioctl_buffer[i] <= 'z')
-					temp_half_IPEK |= (ioctl_buffer[i] - 'a' + 10);
-				else if(ioctl_buffer[i] >= 'A' && ioctl_buffer[i] <= 'Z')
-					temp_half_IPEK |= (ioctl_buffer[i] - 'A' + 10);
+				if(DUKPT_cmd_buffer[i] >= '0' && DUKPT_cmd_buffer[i] <= '9')
+					temp_half_IPEK |= (DUKPT_cmd_buffer[i] - '0');
+				else if(DUKPT_cmd_buffer[i] >= 'a' && DUKPT_cmd_buffer[i] <= 'z')
+					temp_half_IPEK |= (DUKPT_cmd_buffer[i] - 'a' + 10);
+				else if(DUKPT_cmd_buffer[i] >= 'A' && DUKPT_cmd_buffer[i] <= 'Z')
+					temp_half_IPEK |= (DUKPT_cmd_buffer[i] - 'A' + 10);
 				else
 					return -EINVAL;
 			}
@@ -252,24 +265,24 @@ static long device_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
 			break;
 		case LOAD_INITIAL_KEY_KSN:
 		
-			copy_from_user(ioctl_buffer, (char*)arg, 20);
+			copy_from_user(DUKPT_cmd_buffer, (char*)arg, 20);
 			for(i=0; i<10; i++)
 			{
-				if(ioctl_buffer[2*i] >= '0' && ioctl_buffer[2*i] <= '9')
-					DUKPT_Instance->KSNReg[i] = (ioctl_buffer[2*i] - '0') << 4;
-				else if(ioctl_buffer[2*i] >= 'a' && ioctl_buffer[2*i] <= 'z')
-					DUKPT_Instance->KSNReg[i] = (ioctl_buffer[2*i] - 'a' + 10) << 4;
-				else if(ioctl_buffer[2*i] >= 'A' && ioctl_buffer[2*i] <= 'Z')
-					DUKPT_Instance->KSNReg[i] = (ioctl_buffer[2*i] - 'A' + 10) << 4;
+				if(DUKPT_cmd_buffer[2*i] >= '0' && DUKPT_cmd_buffer[2*i] <= '9')
+					DUKPT_Instance->KSNReg[i] = (DUKPT_cmd_buffer[2*i] - '0') << 4;
+				else if(DUKPT_cmd_buffer[2*i] >= 'a' && DUKPT_cmd_buffer[2*i] <= 'z')
+					DUKPT_Instance->KSNReg[i] = (DUKPT_cmd_buffer[2*i] - 'a' + 10) << 4;
+				else if(DUKPT_cmd_buffer[2*i] >= 'A' && DUKPT_cmd_buffer[2*i] <= 'Z')
+					DUKPT_Instance->KSNReg[i] = (DUKPT_cmd_buffer[2*i] - 'A' + 10) << 4;
 				else
 					return -EINVAL;
 				
-				if(ioctl_buffer[2*i+1] >= '0' && ioctl_buffer[2*i+1] <= '9')
-					DUKPT_Instance->KSNReg[i] |= (ioctl_buffer[2*i+1] - '0');
-				else if(ioctl_buffer[2*i+1] >= 'a' && ioctl_buffer[2*i+1] <= 'z')
-					DUKPT_Instance->KSNReg[i] |= (ioctl_buffer[2*i+1] - 'a' + 10);
-				else if(ioctl_buffer[2*i+1] >= 'A' && ioctl_buffer[2*i+1] <= 'Z')
-					DUKPT_Instance->KSNReg[i] |= (ioctl_buffer[2*i+1] - 'A' + 10);
+				if(DUKPT_cmd_buffer[2*i+1] >= '0' && DUKPT_cmd_buffer[2*i+1] <= '9')
+					DUKPT_Instance->KSNReg[i] |= (DUKPT_cmd_buffer[2*i+1] - '0');
+				else if(DUKPT_cmd_buffer[2*i+1] >= 'a' && DUKPT_cmd_buffer[2*i+1] <= 'z')
+					DUKPT_Instance->KSNReg[i] |= (DUKPT_cmd_buffer[2*i+1] - 'a' + 10);
+				else if(DUKPT_cmd_buffer[2*i+1] >= 'A' && DUKPT_cmd_buffer[2*i+1] <= 'Z')
+					DUKPT_Instance->KSNReg[i] |= (DUKPT_cmd_buffer[2*i+1] - 'A' + 10);
 				else
 					return -EINVAL;
 
@@ -323,18 +336,18 @@ static long device_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
 			}
 
 			
-			copy_from_user(ioctl_buffer, (char*)arg, 16);
+			copy_from_user(DUKPT_cmd_buffer, (char*)arg, 16);
 			/* input: right-most 12 digits(nibbles) of PAN */
 			DUKPT_Instance->AccountReg = 0;
 			for(i = 0 ; i < 16; i++)
 			{
 				DUKPT_Instance->AccountReg <<= 4;
-				if(ioctl_buffer[i] >= '0' && ioctl_buffer[i] <= '9')
-					DUKPT_Instance->AccountReg |= (ioctl_buffer[i] - '0');
-				else if(ioctl_buffer[i] >= 'a' && ioctl_buffer[i] <= 'z')
-					DUKPT_Instance->AccountReg |= (ioctl_buffer[i] - 'a' + 10);
-				else if(ioctl_buffer[i] >= 'A' && ioctl_buffer[i] <= 'Z')
-					DUKPT_Instance->AccountReg |= (ioctl_buffer[i] - 'A' + 10);
+				if(DUKPT_cmd_buffer[i] >= '0' && DUKPT_cmd_buffer[i] <= '9')
+					DUKPT_Instance->AccountReg |= (DUKPT_cmd_buffer[i] - '0');
+				else if(DUKPT_cmd_buffer[i] >= 'a' && DUKPT_cmd_buffer[i] <= 'z')
+					DUKPT_Instance->AccountReg |= (DUKPT_cmd_buffer[i] - 'a' + 10);
+				else if(DUKPT_cmd_buffer[i] >= 'A' && DUKPT_cmd_buffer[i] <= 'Z')
+					DUKPT_Instance->AccountReg |= (DUKPT_cmd_buffer[i] - 'A' + 10);
 				else
 					return -EINVAL;
 			}
@@ -411,6 +424,23 @@ static long device_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
 
 
 
+static struct file_operations DUKPT_data_fops =
+{
+	.owner			= THIS_MODULE,
+	.read			= DUKPT_data_read,
+	.write			= DUKPT_data_write,
+	.open			= DUKPT_data_open,
+	.unlocked_ioctl	= DUKPT_data_ioctl, 
+	.release		= DUKPT_data_release,
+};
+
+
+
+static int DUKPT_data_open(struct inode *inode, struct file *file){ return 0;}
+static int DUKPT_data_release(struct inode *inode, struct file *file){ return 0;}
+static ssize_t DUKPT_data_read(struct file *filp, char __user *buf, size_t len, loff_t *off){ return 0;}
+static ssize_t DUKPT_data_write(struct file *filp, const char __user *buf, size_t len, loff_t *off){ return 0;}
+static long DUKPT_data_ioctl(struct file* file, unsigned int cmd, unsigned long arg){ return 0;}
 
 
 
@@ -420,23 +450,41 @@ static int __init DUKPT_Originator_init(void)
 	/* Assign PIN Block Directly instead of calling Request PIN Entry */
 	
 
-	/* Allocate Major number */
-	if((alloc_chrdev_region(&dev, 0, 1, "DUKPT_Dev")) < 0)
+	/* DUKPT_cmd: Allocate Major number */
+	if((alloc_chrdev_region(&DUKPT_cmd_dev, 0, 1, "DUKPT_cmd_dev")) < 0)
 	{
 		printk(KERN_INFO "Cannot allocate major number\n");
 		return -1;
 	}
-	printk(KERN_INFO "Major = %d Minor = %d \n", MAJOR(dev), MINOR(dev));
+	printk(KERN_INFO "DUKPT cmd device: Major = %d Minor = %d \n", MAJOR(DUKPT_cmd_dev), MINOR(DUKPT_cmd_dev));
 
-	/* Create cdev structure for the driver module */
-	cdev_init(&DUKPT_cdev, &fops);
+	
+	/* DUKPT_data: Allocate Major number */
+	if((alloc_chrdev_region(&DUKPT_data_dev, 0, 1, "DUKPT_data_dev")) < 0)
+	{
+		printk(KERN_INFO "Cannot allocate major number\n");
+		return -1;
+	}
+	printk(KERN_INFO "DUKPT data device: Major = %d Minor = %d \n", MAJOR(DUKPT_data_dev), MINOR(DUKPT_data_dev));
+	
+
+	/* Create a cdev structure of cmd device for the driver module */
+	cdev_init(&DUKPT_cmd_cdev, &DUKPT_cmd_fops);
+	cdev_init(&DUKPT_data_cdev, &DUKPT_data_fops);
+
 
 	/* Add character device to the system */
-	if((cdev_add(&DUKPT_cdev, dev, 1)) < 0)
+	if((cdev_add(&DUKPT_cmd_cdev, DUKPT_cmd_dev, 1)) < 0)
 	{
-		printk(KERN_INFO "Cannot add the device to the system\n");
+		printk(KERN_INFO "Cannot add the cmd device to the system\n");
 		goto r_class;
 	}
+	if((cdev_add(&DUKPT_data_cdev, DUKPT_data_dev, 1)) < 0)
+	{
+		printk(KERN_INFO "Cannot add the data device to the system\n");
+		goto r_class;
+	}
+
 
 	/* Create struct class (high-level view of devices) */
 	if((dev_class = class_create(THIS_MODULE, "DUKPT_class")) == NULL)
@@ -445,17 +493,24 @@ static int __init DUKPT_Originator_init(void)
 		goto r_class;
 	}
 
+
 	/* Create device */
-	if((device_create(dev_class, NULL, dev, NULL, "DUKPT_device")) == NULL)
+	if((device_create(dev_class, NULL, DUKPT_cmd_dev, NULL, "DUKPT_cmd")) == NULL)
 	{
-		printk(KERN_INFO "Cannot create the Device 1\n");
+		printk(KERN_INFO "Cannot create the cmd Device 1\n");
+		goto r_device;
+	}
+	if((device_create(dev_class, NULL, DUKPT_data_dev, NULL, "DUKPT_data")) == NULL)
+	{
+		printk(KERN_INFO "Cannot create the data Device 1\n");
 		goto r_device;
 	}
 
+
 	/* Allocate DUKPT_Reg instance */
 	DUKPT_Instance = kmalloc(sizeof(DUKPT_Reg), GFP_KERNEL);
-	ioctl_buffer = kmalloc(50, GFP_KERNEL);
-
+	DUKPT_cmd_buffer = kmalloc(50, GFP_KERNEL);
+	DUKPT_data_buffer = kmalloc(MAX_TRANSACTION_DATA_LEN, GFP_KERNEL);
 
 	/* Directly assign in program (for test) */
 	//KSN[0] = 0xFF; KSN[1] = 0xFF; KSN[2] = 0x98; KSN[3] = 0x76;
@@ -516,20 +571,28 @@ static int __init DUKPT_Originator_init(void)
 r_device:
 	class_destroy(dev_class);
 r_class:
-	unregister_chrdev_region(dev, 1);
+	unregister_chrdev_region(DUKPT_cmd_dev, 1);
+	unregister_chrdev_region(DUKPT_data_dev, 1);
 
 	kfree(DUKPT_Instance);
-	kfree(ioctl_buffer);
+	kfree(DUKPT_cmd_buffer);
+	kfree(DUKPT_data_buffer);
 
 	return -1;
 }
 
 static void __exit DUKPT_Originator_exit(void)
 {
-	device_destroy(dev_class, dev);
+	device_destroy(dev_class, DUKPT_cmd_dev);
+	device_destroy(dev_class, DUKPT_data_dev);
+	
 	class_destroy(dev_class);
-	cdev_del(&DUKPT_cdev);
-	unregister_chrdev_region(dev, 1);
+	
+	cdev_del(&DUKPT_cmd_cdev);
+	cdev_del(&DUKPT_data_cdev);
+
+	unregister_chrdev_region(DUKPT_cmd_dev, 1);
+	unregister_chrdev_region(DUKPT_data_dev, 1);
 
 	kfree(DUKPT_Instance);
 
