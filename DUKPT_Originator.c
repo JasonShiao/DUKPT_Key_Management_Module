@@ -24,9 +24,19 @@
 #include <linux/unistd.h>
 
 #include "DES.h"
+#include "TDES.h"
 #include "DUKPT.h"
+#include "CBC_MAC.h"
 
-#define MAX_TRANSACTION_DATA_LEN 400
+#define KSN_LEN 20
+#define PIN_BLOCK_LEN 16
+#define MAX_TRANSACTION_DATA_LEN 200
+#define MAC_REQ_LEN 16
+#define MAC_RESP_LEN 16
+/* Use a space to separate each field for output */
+#define DATA_BUFFER_LEN (KSN_LEN + 1 + PIN_BLOCK_LEN + 1 \
+						+ MAX_TRANSACTION_DATA_LEN + 1 \
+						+ MAC_REQ_LEN + 1 + MAC_RESP_LEN) 
 
 #define IOCTL_MAGIC 70
 
@@ -37,7 +47,9 @@
 #define POWER_ON_RESET _IO(IOCTL_MAGIC, 4)
 
 #define SET_CLEAR_DATA _IOW(IOCTL_MAGIC, 5, char*)
-#define GET_ENCRYPT_DATA _IOR(IOCTL_MAGIC, 6)
+#define SET_CLEAR_DATA_LEN _IOW(IOCTL_MAGIC, 6, size_t)
+#define GET_ENCRYPT_DATA _IOR(IOCTL_MAGIC, 7, char*)
+#define GET_ENCRYPT_DATA_LEN _IOR(IOCTL_MAGIC, 8, char*)
 
 
 /*   Global Variable   */
@@ -47,14 +59,21 @@ static struct class *dev_class;
 static struct cdev DUKPT_cmd_cdev;
 static struct cdev DUKPT_data_cdev;
 
-
-uint8_t *kernel_buffer;
 static uint8_t* DUKPT_cmd_buffer;
-static uint8_t* DUKPT_data_buffer;
 
+static uint8_t* DUKPT_data_buffer;
+static size_t DUKPT_data_len;
 
 typedef enum {READY, ACTIVE, EXIT}ReadStateType; 
 ReadStateType read_state = READY;
+
+typedef enum 
+{
+	NO_PIN,
+	NO_INPUT_DATA,
+	ENCRYPT_DONE
+}Data_Encrypt_State;
+Data_Encrypt_State encrypt_state = NO_INPUT_DATA;
 
 static DUKPT_Reg *DUKPT_Instance;
 
@@ -75,6 +94,8 @@ static ssize_t DUKPT_data_read(struct file *filp, char __user *buf, size_t len, 
 static ssize_t DUKPT_data_write(struct file *filp, const char __user *buf, size_t len, loff_t *off);
 static long DUKPT_data_ioctl(struct file* file, unsigned int cmd, unsigned long arg);
 
+static void Prepare_data(DUKPT_Reg* DUKPT_Instance, uint8_t* DUKPT_data_buffer, size_t* DUKPT_data_len);
+
 static struct file_operations DUKPT_cmd_fops =
 {
 	.owner			= THIS_MODULE,
@@ -87,124 +108,23 @@ static struct file_operations DUKPT_cmd_fops =
 
 static int DUKPT_cmd_open(struct inode *inode, struct file *file)
 {
-
-	/* Create physical memory */
-	if((kernel_buffer = kmalloc(1024, GFP_KERNEL)) == 0)
-	{
-		printk(KERN_INFO "Cannot allocate memory in kernel\n");
-		return -1;
-	}
 	printk(KERN_INFO "Device File Opened...!!!\n");
 	return 0;
 }
 
 static int DUKPT_cmd_release(struct inode *inode, struct file *file)
 {
-	kfree(kernel_buffer);
 	printk(KERN_INFO "Device File Closed...!!!\n");
 	return 0;
 }
 
 static ssize_t DUKPT_cmd_read(struct file *file, char __user *buf, size_t len, loff_t *off)
 {
-	
-	ssize_t bytes_read;
-
-	switch(read_state)
-	{
-		case READY:
-
-			Request_PIN_Entry_1(DUKPT_Instance);
-
-			/* Return encrypted PIN Block (stored in CryptoReg) to user space */
-			snprintf(kernel_buffer, 1024, "%016llX\n", DUKPT_Instance->CryptoReg[0]);
-			printk(KERN_INFO "Encrypted PIN Block: %016llX \n", DUKPT_Instance->CryptoReg[0]);
-		
-			/* New Key */
-			NewKey(DUKPT_Instance);
-
-			bytes_read = simple_read_from_buffer(buf, len, off, kernel_buffer, strlen(kernel_buffer));
-			
-			break;
-		case ACTIVE:
-			
-			bytes_read = simple_read_from_buffer(buf, len, off, kernel_buffer, strlen(kernel_buffer));
-			
-			break;
-		case EXIT:
-		default:
-			read_state = READY;
-			bytes_read = simple_read_from_buffer(buf, len, off, kernel_buffer, strlen(kernel_buffer));
-			return bytes_read;
-			break;
-	}
-
-
-	if(strlen(kernel_buffer) - *off == 0)
-		read_state = EXIT;
-	else if(strlen(kernel_buffer) - *off > 0)
-	{
-		read_state = ACTIVE;
-	}
-
-	return bytes_read;
-
+	return 0;
 }
 
 static ssize_t DUKPT_cmd_write(struct file *file, const char __user *buf, size_t len, loff_t *off)
 {
-
-	size_t i;
-	uint64_t PIN_Block = 0x0;
-
-	/* check PIN Block len */
-	if(len > (16+1))
-	{
-		printk(KERN_INFO "Invalid PIN length!\n");
-		return -1;
-	}
-
-
-	/* Accept PIN from user space */
-	copy_from_user(kernel_buffer, buf, len);
-
-
-	/* check PIN Block digit value */
-	printk(KERN_INFO "user input len: %zu \n", len);
-	for(i = 0; i < (len-1); i++)
-	{
-		if((kernel_buffer[i] < '0' || kernel_buffer[i] > '9') && (kernel_buffer[i] < 'A' || kernel_buffer[i] > 'Z'))
-		{
-			printk(KERN_INFO "Invalid PIN digit value!\n");
-			return -1;
-		}
-	}
-
-	/* Convert PIN Block from char array to uint64_t */
-	for(i = 0; i < (len-1); i++)
-	{
-		PIN_Block <<= 4;
-		if(kernel_buffer[i] >= '0' && kernel_buffer[i] <= '9')
-		{
-			PIN_Block |= (uint64_t)(kernel_buffer[i] - '0');
-		}
-		else if(kernel_buffer[i] >= 'A' && kernel_buffer[i] <= 'Z')
-		{
-			PIN_Block |= (uint64_t)(kernel_buffer[i] - 'A' + 10);
-		}
-		else
-		{
-			printk(KERN_INFO "Invalid PIN digit\n");
-			return -1;
-		}
-	}
-
-	/* Store PIN Block into Crypto Register 1 */
-	DUKPT_Instance->CryptoReg[0] = PIN_Block;
-
-
-	printk(KERN_INFO "PIN Block input: Done\n");
-	
 	return len;
 }
 
@@ -323,11 +243,18 @@ static long DUKPT_cmd_ioctl(struct file* file, unsigned int cmd, unsigned long a
 
 			//Exit();
 
+			/* The DUKPT module is ready to use for transaction data encryption */
 			DUKPT_Instance->current_state = DUKPT_ACTIVE;
 
 			return 0;
 			break;
 		case REQUEST_PIN_ENTRY:
+
+			if(encrypt_state == NO_INPUT_DATA)
+			{
+				printk(KERN_INFO "No input data yet!\n");
+				return 0;
+			}
 
 			if(DUKPT_Instance->current_state == DUKPT_OVERFLOW)
 			{
@@ -335,9 +262,10 @@ static long DUKPT_cmd_ioctl(struct file* file, unsigned int cmd, unsigned long a
 				return 0;
 			}
 
-			
+			/* Get PAN */
 			copy_from_user(DUKPT_cmd_buffer, (char*)arg, 16);
-			/* input: right-most 12 digits(nibbles) of PAN */
+
+			/* Format PAN data */
 			DUKPT_Instance->AccountReg = 0;
 			for(i = 0 ; i < 16; i++)
 			{
@@ -354,7 +282,8 @@ static long DUKPT_cmd_ioctl(struct file* file, unsigned int cmd, unsigned long a
 			printk(KERN_INFO "Account Reg: %016llX\n", DUKPT_Instance->AccountReg);
 			
 
-			/* TODO: Enable a keypad/keyboard for PIN entry */
+			/* TODO: Enable a keypad/keyboard for PIN entry (A little challenging to get USB keyboard input) */
+			/* NOTE: Prefer to halt and get keyboard buffer here */
 			temp_PIN_field = 0x041234FFFFFFFFFF; /* Directly assign here for demo/test */
 
 
@@ -376,6 +305,19 @@ static long DUKPT_cmd_ioctl(struct file* file, unsigned int cmd, unsigned long a
 			}
 
 			Request_PIN_Entry_2(DUKPT_Instance);
+
+			/* TODO: Use derived keys to encrypt PIN block, KSN, transaction data and MAC */
+			printk(KERN_INFO "PIN Key: %016llX %016llX\n", DUKPT_Instance->KeyReg[0], DUKPT_Instance->KeyReg[1]);
+			printk(KERN_INFO "MAC Key: %016llX %016llX\n", DUKPT_Instance->MACKeyReg[0], DUKPT_Instance->MACKeyReg[1]);
+			printk(KERN_INFO "MAC Response Key: %016llX %016llX\n", DUKPT_Instance->MACResponseKeyReg[0], DUKPT_Instance->MACResponseKeyReg[1]);
+			printk(KERN_INFO "Data Key: %016llX %016llX\n", DUKPT_Instance->DataKeyReg[0], DUKPT_Instance->DataKeyReg[1]);
+			// ...
+			
+			Prepare_data(DUKPT_Instance, DUKPT_data_buffer, &DUKPT_data_len);		
+
+			// ...
+			// ...
+
 
 			ret = NewKey(DUKPT_Instance);
 
@@ -399,6 +341,9 @@ static long DUKPT_cmd_ioctl(struct file* file, unsigned int cmd, unsigned long a
 			}
 
 			//Exit();
+		
+			/* Set the state: ready to be read */
+			encrypt_state = ENCRYPT_DONE;
 				
 			return 0;
 			break;
@@ -438,9 +383,216 @@ static struct file_operations DUKPT_data_fops =
 
 static int DUKPT_data_open(struct inode *inode, struct file *file){ return 0;}
 static int DUKPT_data_release(struct inode *inode, struct file *file){ return 0;}
-static ssize_t DUKPT_data_read(struct file *filp, char __user *buf, size_t len, loff_t *off){ return 0;}
-static ssize_t DUKPT_data_write(struct file *filp, const char __user *buf, size_t len, loff_t *off){ return 0;}
-static long DUKPT_data_ioctl(struct file* file, unsigned int cmd, unsigned long arg){ return 0;}
+static ssize_t DUKPT_data_read(struct file *filp, char __user *buf, size_t len, loff_t *off)
+{
+	ssize_t bytes_read;
+
+	if(DUKPT_data_len == 0)
+	{
+		printk(KERN_INFO "No data entered yet!\n");
+		return -1;
+	}
+
+	/* If not encrypted yet */
+	if(encrypt_state == NO_INPUT_DATA)
+	{
+		printk(KERN_INFO "No data entered yet!\n");
+		return -1;
+	}
+	if(encrypt_state == NO_PIN)
+	{
+		printk(KERN_INFO "No PIN entered yet!\n");
+		return -1;
+	}
+
+	bytes_read = simple_read_from_buffer(buf, len, off, DUKPT_data_buffer, DUKPT_data_len);
+
+	if(bytes_read == 0)
+	{
+		encrypt_state = NO_INPUT_DATA;
+		DUKPT_data_len = 0;
+		printk(KERN_INFO "Data read ...Done\n");
+	}
+
+	return bytes_read;
+	
+	
+}
+
+static ssize_t DUKPT_data_write(struct file *filp, const char __user *buf, size_t len, loff_t *off)
+{ 
+
+	/* check input data len */
+	if(len == 0)
+	{
+		printk(KERN_DEBUG "Input data length can't be 0!\n");
+		return -1;
+	}
+	if(len > MAX_TRANSACTION_DATA_LEN)
+	{
+		printk(KERN_DEBUG "Data length too large!\n");
+		return -1;
+	}
+
+	/* Accept data from user space */
+	DUKPT_data_len = len;
+	copy_from_user(DUKPT_data_buffer, buf, len);
+	encrypt_state = NO_PIN;
+
+	printk(KERN_INFO "Data write ...Done\n");
+	
+	return len;
+}
+
+
+
+
+static long DUKPT_data_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
+{ 
+	switch(cmd)
+	{
+		case SET_CLEAR_DATA:
+			break;
+		case SET_CLEAR_DATA_LEN:
+			break;
+		case GET_ENCRYPT_DATA:
+			break;
+		case GET_ENCRYPT_DATA_LEN:
+			break;
+		default:
+			break;
+	}
+
+	return 0;
+}
+
+
+
+static void Prepare_data(DUKPT_Reg* DUKPT_Instance, uint8_t* DUKPT_data_buffer, size_t* DUKPT_data_len)
+{
+	size_t i;
+	uint8_t tmp_data_element[3]; /* one element = two nibbles */
+	unsigned int tmp_data_value;
+
+	uint8_t *tmp_data_buf = kmalloc((size_t)(*DUKPT_data_len)/2, GFP_KERNEL);
+	uint8_t *tmp_encrypt_data_buf = kmalloc((size_t)(*DUKPT_data_len)/2, GFP_KERNEL);
+	
+	uint8_t tmp_data_key_array[16];
+	
+	uint8_t CBC_MAC[8];
+	uint8_t tmpMACKey_L[8];
+	uint8_t tmpMACKey_R[8];
+
+	/* Combine every two nibbles(ASCII-hex) into one uint8_t data */
+	tmp_data_element[2] = '\0';
+	for(i = 0; i < (*DUKPT_data_len)/2; i++)
+	{
+		memcpy(tmp_data_element, DUKPT_data_buffer + 2*i, 2);
+		sscanf(tmp_data_element, "%02X", &tmp_data_value);
+		tmp_data_buf[i] = (uint8_t)tmp_data_value;
+	}
+	
+	/* KSN */
+	snprintf(DUKPT_data_buffer, KSN_LEN + 1, "%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X", 
+						DUKPT_Instance->KSNReg[0], DUKPT_Instance->KSNReg[1],
+						DUKPT_Instance->KSNReg[2], DUKPT_Instance->KSNReg[3],
+						DUKPT_Instance->KSNReg[4], DUKPT_Instance->KSNReg[5],
+						DUKPT_Instance->KSNReg[6], DUKPT_Instance->KSNReg[7],
+						DUKPT_Instance->KSNReg[8], DUKPT_Instance->KSNReg[9]
+			);
+	DUKPT_data_buffer[KSN_LEN] = ' ';
+	/* PIN Block */
+	snprintf(DUKPT_data_buffer + KSN_LEN + 1, 
+				PIN_BLOCK_LEN + 1, 
+				"%016llX", 
+				DUKPT_Instance->CryptoReg[0]);
+	DUKPT_data_buffer[KSN_LEN + PIN_BLOCK_LEN + 1] = ' ';
+
+
+	/* Data */
+	uint64_to_ByteArray(DUKPT_Instance->DataKeyReg[0], tmp_data_key_array);
+	uint64_to_ByteArray(DUKPT_Instance->DataKeyReg[1], tmp_data_key_array + 8);
+	TDEA_CBC_Encrypt(
+						tmp_data_buf, 
+						(*DUKPT_data_len)/2,
+						tmp_data_key_array, 
+						16,
+						NULL,
+						tmp_encrypt_data_buf
+					);
+	for(i = 0; i < (*DUKPT_data_len)/2; i++)
+	{
+		snprintf(DUKPT_data_buffer + KSN_LEN + PIN_BLOCK_LEN + 2 + 2*i, 
+					2 + 1, 
+					"%02X",
+					tmp_encrypt_data_buf[i]);
+	}				
+	DUKPT_data_buffer[KSN_LEN + PIN_BLOCK_LEN + *DUKPT_data_len + 2] = ' ';
+
+	/* MAC Req */
+	uint64_to_ByteArray(DUKPT_Instance->MACKeyReg[0], tmpMACKey_L);
+	uint64_to_ByteArray(DUKPT_Instance->MACKeyReg[1], tmpMACKey_R);
+	CBC_MAC_Generation(
+						tmp_data_buf, 
+						(*DUKPT_data_len)/2, 
+						"DES", 
+						tmpMACKey_L,
+						8,
+						CBC_MAC
+					);
+
+	DES_Decrypt(CBC_MAC, 8, tmpMACKey_R, 8, CBC_MAC);
+	DES_Encrypt(CBC_MAC, 8, tmpMACKey_L, 8, CBC_MAC);
+
+	snprintf(DUKPT_data_buffer + KSN_LEN + PIN_BLOCK_LEN + *DUKPT_data_len + 3, 
+				16 + 1 ,
+				"%02X%02X%02X%02X%02X%02X%02X%02X", 
+				CBC_MAC[0], CBC_MAC[1], 
+				CBC_MAC[2], CBC_MAC[3],
+				CBC_MAC[4], CBC_MAC[5],
+				CBC_MAC[6], CBC_MAC[7]);
+	
+	DUKPT_data_buffer[KSN_LEN + PIN_BLOCK_LEN + *DUKPT_data_len + 16 + 3] = ' ';
+	
+	/* MAC Resp */
+	
+	uint64_to_ByteArray(DUKPT_Instance->MACResponseKeyReg[0], tmpMACKey_L);
+	uint64_to_ByteArray(DUKPT_Instance->MACResponseKeyReg[1], tmpMACKey_R);
+	CBC_MAC_Generation(
+						tmp_data_buf, 
+						(*DUKPT_data_len)/2, 
+						"DES", 
+						tmpMACKey_L,
+						8,
+						CBC_MAC
+					);
+
+	DES_Decrypt(CBC_MAC, 8, tmpMACKey_R, 8, CBC_MAC);
+	DES_Encrypt(CBC_MAC, 8, tmpMACKey_L, 8, CBC_MAC);
+
+	snprintf(DUKPT_data_buffer + KSN_LEN + PIN_BLOCK_LEN + *DUKPT_data_len + 16 + 4, 
+				16 + 1 ,
+				"%02X%02X%02X%02X%02X%02X%02X%02X", 
+				CBC_MAC[0], CBC_MAC[1], 
+				CBC_MAC[2], CBC_MAC[3],
+				CBC_MAC[4], CBC_MAC[5],
+				CBC_MAC[6], CBC_MAC[7]);
+	
+	DUKPT_data_buffer[KSN_LEN + PIN_BLOCK_LEN + *DUKPT_data_len + 16 + 16 + 4] = ' ';
+	
+	/* Set return data length */
+	*DUKPT_data_len =  KSN_LEN + 1 
+						+ PIN_BLOCK_LEN + 1 
+						+ *DUKPT_data_len + 1 
+						+ 16 + 1
+						+ 16 + 1;
+	
+	
+	kfree(tmp_data_buf);
+	kfree(tmp_encrypt_data_buf);
+
+}
+
 
 
 
@@ -510,7 +662,8 @@ static int __init DUKPT_Originator_init(void)
 	/* Allocate DUKPT_Reg instance */
 	DUKPT_Instance = kmalloc(sizeof(DUKPT_Reg), GFP_KERNEL);
 	DUKPT_cmd_buffer = kmalloc(50, GFP_KERNEL);
-	DUKPT_data_buffer = kmalloc(MAX_TRANSACTION_DATA_LEN, GFP_KERNEL);
+	DUKPT_data_buffer = kmalloc(DATA_BUFFER_LEN, GFP_KERNEL);
+	DUKPT_data_len = 0;
 
 	/* Directly assign in program (for test) */
 	//KSN[0] = 0xFF; KSN[1] = 0xFF; KSN[2] = 0x98; KSN[3] = 0x76;
@@ -523,42 +676,6 @@ static int __init DUKPT_Originator_init(void)
 	//IPEK[0] = 0x6AC292FAA1315B4D;
 	//IPEK[1] = 0x858AB3A3D7D5933A;
 	// can use CalcIPEK(BDK, KSN, IPEK) to calculate IPEK from BDK and KSN;
-
-	//printk(KERN_INFO "-------------------------------------------------\n");
-	//printk(KERN_INFO "KSN = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n", KSN[0], KSN[1], KSN[2], KSN[3], KSN[4], KSN[5], KSN[6], KSN[7], KSN[8], KSN[9]);
-	//printk(KERN_INFO "IPEK = %016llx %016llx\n", IPEK[0], IPEK[1]);
-	//printk(KERN_INFO "-------------------------------------------------\n");
-
-
-	
-	/* End of sample data assignment */
-
-	/****************     Initialization Start     ******************/
-
-	/* Load Initial Key */
-	//DUKPT_Instance->FKReg[20].LeftHalf = IPEK[0];
-	//DUKPT_Instance->FKReg[20].RightHalf = IPEK[1];
-
-	//GenerateLRC(&(DUKPT_Instance->FKReg[20]));
-	//DUKPT_Instance->CurrentKeyPtr = &DUKPT_Instance->FKReg[20];
-
-
-
-	/* Set Key Serial Number Register */
-	//for (i = 0; i < 10; i++)
-	//	DUKPT_Instance->KSNReg[i] = KSN[i];
-
-	/* Clear Encryption Counter (right-most 21 bits) */
-	//DUKPT_Instance->KSNReg[9] = DUKPT_Instance->KSNReg[9] & (uint8_t)0x0;
-	//DUKPT_Instance->KSNReg[8] = DUKPT_Instance->KSNReg[8] & (uint8_t)0x0;
-	//DUKPT_Instance->KSNReg[7] = DUKPT_Instance->KSNReg[7] & (uint8_t)0xE0;
-
-
-	/* Set #1 bit (leftmost bit) of ShiftReg to 1 */
-	//DUKPT_Instance->ShiftReg = (uint64_t)(0x1) << 20;
-
-
-	//NewKey_3(DUKPT_Instance);
 
 	/***************      Initialization Finished      ****************/
 

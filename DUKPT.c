@@ -6,6 +6,7 @@
 #include <linux/string.h>
 
 #include "DES.h"
+#include "TDES.h"
 
 uint64_t PINField_format0(char PIN[14+1])
 {
@@ -149,8 +150,26 @@ void CalcIPEK(uint64_t BDK[2], uint8_t KSN[10], uint64_t IPEK[2])
 	}
 	printk(KERN_INFO "IKSN: %016llX\n", IKSN);
 
-	IPEK[0] = DES_Encrypt(DES_Decrypt(DES_Encrypt(IKSN, BDK[0]), BDK[1]), BDK[0]);
-	IPEK[1] = DES_Encrypt(DES_Decrypt(DES_Encrypt(IKSN, BDK[0]^BDKmask[0]), BDK[1]^BDKmask[1]), BDK[0]^BDKmask[0]);
+	IPEK[0] = DES_Encrypt_Block( 
+				DES_Decrypt_Block( 
+					DES_Encrypt_Block(
+						IKSN, 
+						BDK[0]
+					), 
+					BDK[1]
+				), 
+				BDK[0]
+			);
+	IPEK[1] = DES_Encrypt_Block( 
+				DES_Decrypt_Block( 
+					DES_Encrypt_Block(
+						IKSN, 
+						BDK[0]^BDKmask[0]
+					), 
+					BDK[1]^BDKmask[1]
+				),
+				BDK[0]^BDKmask[0]
+			);
 
 }
 
@@ -168,8 +187,10 @@ void generateKey(uint64_t key[2], uint64_t baseKSN)
 
 	//printk(KERN_INFO "baseKSN: %016llX | maskedKey: %016llX %016llX\n", baseKSN, maskedKey[0], maskedKey[1]);
 	//printk(KERN_INFO "baseKSN: %016llX | key: %016llX %016llX\n", baseKSN, key[0], key[1]);
-	left = DES_Encrypt(baseKSN ^ maskedKey[1], maskedKey[0]) ^ maskedKey[1];
-	right = DES_Encrypt(baseKSN ^ key[1], key[0]) ^ key[1];
+	left = DES_Encrypt_Block(baseKSN ^ maskedKey[1], maskedKey[0]) 
+			^ maskedKey[1];
+	right = DES_Encrypt_Block(baseKSN ^ key[1], key[0]) 
+			^ key[1];
 	
 	key[0] = left;
 	key[1] = right;
@@ -183,11 +204,23 @@ void NonReversibleKeyGen(DUKPT_Reg* DUKPT_Instance)
 	maskedKey[0] = mask[0] ^ DUKPT_Instance->KeyReg[0];
 	maskedKey[1] = mask[1] ^ DUKPT_Instance->KeyReg[1];
 
-	//printk(KERN_INFO "baseKSN: %016llx | key: %016llx %016llx\n", DUKPT_Instance->CryptoReg[0], DUKPT_Instance->KeyReg[0], DUKPT_Instance->KeyReg[1]);
-	//printk(KERN_INFO "baseKSN: %016llx | maskedKey: %016llx %016llx\n", DUKPT_Instance->CryptoReg[0], maskedKey[0], maskedKey[1]);
-	DUKPT_Instance->CryptoReg[1] = DES_Encrypt(DUKPT_Instance->CryptoReg[0] ^ DUKPT_Instance->KeyReg[1], DUKPT_Instance->KeyReg[0]);
+	//printk(KERN_INFO "baseKSN: %016llx | key: %016llx %016llx\n", 
+					//DUKPT_Instance->CryptoReg[0], 
+					//DUKPT_Instance->KeyReg[0], 
+					//DUKPT_Instance->KeyReg[1]);
+	//printk(KERN_INFO "baseKSN: %016llx | maskedKey: %016llx %016llx\n", 
+					//DUKPT_Instance->CryptoReg[0], 
+					//maskedKey[0], 
+					//maskedKey[1]);
+	DUKPT_Instance->CryptoReg[1] = DES_Encrypt_Block(
+										DUKPT_Instance->CryptoReg[0] ^ DUKPT_Instance->KeyReg[1], 
+										DUKPT_Instance->KeyReg[0]
+									);
 	DUKPT_Instance->CryptoReg[1] ^= DUKPT_Instance->KeyReg[1];
-	DUKPT_Instance->CryptoReg[0] = DES_Encrypt(DUKPT_Instance->CryptoReg[0] ^ maskedKey[1], maskedKey[0]);
+	DUKPT_Instance->CryptoReg[0] = DES_Encrypt_Block(
+										DUKPT_Instance->CryptoReg[0] ^ maskedKey[1], 
+										maskedKey[0]
+									);
 	DUKPT_Instance->CryptoReg[0] ^= maskedKey[1];
 
 }
@@ -389,23 +422,83 @@ int Request_PIN_Entry_1(DUKPT_Reg* DUKPT_Instance)
 void Request_PIN_Entry_2(DUKPT_Reg* DUKPT_Instance)
 {
 
-	uint64_t PIN_variant_const[2] = { 0x00000000000000FF, 0x00000000000000FF };
+	const uint64_t PIN_variant_const[2] = { 0x00000000000000FF, 
+											0x00000000000000FF };
+	const uint64_t MAC_variant_const[2] = { 0x000000000000FF00, 
+											0x000000000000FF00 };
+	const uint64_t MAC_response_variant_const[2] = {0x00000000FF000000, 
+													0x00000000FF000000};
+	const uint64_t Data_variant_const[2] = {0x0000000000FF0000, 
+											0x0000000000FF0000};
+	const uint64_t Data_response_variant_const[2] = {0x000000FF00000000, 
+													 0x000000FF00000000};
+
+	uint64_t tmp_data_key_L;
+	uint64_t tmp_data_key_R;
+
 
 	DUKPT_Instance->KeyReg[0] = (*(DUKPT_Instance->CurrentKeyPtr)).LeftHalf;
 	DUKPT_Instance->KeyReg[1] = (*(DUKPT_Instance->CurrentKeyPtr)).RightHalf;
 
+	/* MAC key variant */
+	DUKPT_Instance->MACKeyReg[0] = DUKPT_Instance->KeyReg[0] ^ MAC_variant_const[0];
+	DUKPT_Instance->MACKeyReg[1] = DUKPT_Instance->KeyReg[1] ^ MAC_variant_const[1];
+
+	/* MAC response key variant */
+	DUKPT_Instance->MACResponseKeyReg[0] = DUKPT_Instance->KeyReg[0] 
+											^ MAC_response_variant_const[0];
+	DUKPT_Instance->MACResponseKeyReg[1] = DUKPT_Instance->KeyReg[1] 
+											^ MAC_response_variant_const[1];
+
+	/* Data encrypting key variant */
+	tmp_data_key_L = DUKPT_Instance->KeyReg[0] ^ Data_variant_const[0];
+	tmp_data_key_R = DUKPT_Instance->KeyReg[1] ^ Data_variant_const[1];
+
+	DUKPT_Instance->DataKeyReg[0] = TDES_Encrypt_Block(
+										tmp_data_key_L,
+										tmp_data_key_L,
+										tmp_data_key_R,
+										tmp_data_key_L
+									);
+	DUKPT_Instance->DataKeyReg[1] = TDES_Encrypt_Block(
+										tmp_data_key_R,
+										tmp_data_key_L,
+										tmp_data_key_R,
+										tmp_data_key_L
+									); 
+
+	/* Data encrypting response key variant */
+	tmp_data_key_L = DUKPT_Instance->KeyReg[0] ^ Data_response_variant_const[0];
+	tmp_data_key_R = DUKPT_Instance->KeyReg[1] ^ Data_response_variant_const[1];
+
+	DUKPT_Instance->DataResponseKeyReg[0] = TDES_Encrypt_Block(
+												tmp_data_key_L,
+												tmp_data_key_L,
+												tmp_data_key_R,
+												tmp_data_key_L
+											);
+	DUKPT_Instance->DataResponseKeyReg[1] = TDES_Encrypt_Block(
+												tmp_data_key_R,
+												tmp_data_key_L,
+												tmp_data_key_R,
+												tmp_data_key_L
+											); 
+	
+	
+	/* PIN Key variant (in Key Register) is stored back to the Key Regsiter */
 	DUKPT_Instance->KeyReg[0] ^= PIN_variant_const[0];
 	DUKPT_Instance->KeyReg[1] ^= PIN_variant_const[1];
 
-	DUKPT_Instance->CryptoReg[0] = DES_Encrypt(DUKPT_Instance->CryptoReg[0], DUKPT_Instance->KeyReg[0]);
-	DUKPT_Instance->CryptoReg[0] = DES_Decrypt(DUKPT_Instance->CryptoReg[0], DUKPT_Instance->KeyReg[1]);
-	DUKPT_Instance->CryptoReg[0] = DES_Encrypt(DUKPT_Instance->CryptoReg[0], DUKPT_Instance->KeyReg[0]);
+	/* TDES encrypt the CryptoReg (PIN Block) with PIN Key */
+	DUKPT_Instance->CryptoReg[0] = TDES_Encrypt_Block(
+										DUKPT_Instance->CryptoReg[0], 
+										DUKPT_Instance->KeyReg[0], 
+										DUKPT_Instance->KeyReg[1],
+										DUKPT_Instance->KeyReg[0]
+									);
 
-	/* TODO: Send transaction message to somewhere */
-
-	/* Format and transmit encrypted PIN Block */
+	/* Print the transaction data to be sent */
 	printk(KERN_INFO "=======================================================\n");
-	printk(KERN_INFO "                   Transaction Message                 \n");
 	printk(KERN_INFO "KSN = %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n", 
 						DUKPT_Instance->KSNReg[0], DUKPT_Instance->KSNReg[1], 
 						DUKPT_Instance->KSNReg[2], DUKPT_Instance->KSNReg[3], 
@@ -415,7 +508,6 @@ void Request_PIN_Entry_2(DUKPT_Reg* DUKPT_Instance)
 	printk(KERN_INFO "Encrypted PIN Block: %016llX\n", DUKPT_Instance->CryptoReg[0]);
 	printk(KERN_INFO "=======================================================\n");
 	
-	//printDUKPTStateSummary(DUKPT_Instance);
 }
 
 

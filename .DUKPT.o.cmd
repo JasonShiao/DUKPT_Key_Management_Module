@@ -149,6 +149,7 @@ deps_/home/jasonshiao/Documents/kernel_modules/DUKPT_Key_Management_Module/DUKPT
     $(wildcard include/config/x86/mce.h) \
     $(wildcard include/config/arch/has/uaccess/flushcache.h) \
   /home/jasonshiao/Documents/kernel_modules/DUKPT_Key_Management_Module/DES.h \
+  /home/jasonshiao/Documents/kernel_modules/DUKPT_Key_Management_Module/TDES.h \
 
 /home/jasonshiao/Documents/kernel_modules/DUKPT_Key_Management_Module/DUKPT.o: $(deps_/home/jasonshiao/Documents/kernel_modules/DUKPT_Key_Management_Module/DUKPT.o)
 

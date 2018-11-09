@@ -1,6 +1,6 @@
 MODULE_NAME = DUKPT_Originator_module
 
-SRCS = DUKPT_Originator.c DES.c DUKPT.c TDES.c
+SRCS = DUKPT_Originator.c DES.c DUKPT.c TDES.c CBC_MAC.c
 
 OBJS = $(SRCS:.c=.o)
 

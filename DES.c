@@ -64,80 +64,8 @@ static const unsigned int SBox[8][4][16] = {
 };
 
 
-void GenSubkey(uint64_t key, uint64_t subkey[16])
-{
-	/* PC-1 */
-	/* only the 56 bits of the 64 bits of key is used */
-	/* (8, 16, 24, 32, 40, 48, 56, 64) bits were specified for use as parity bits */
-	const int PC_1_table_left[28] = {	57, 49, 41, 33, 25, 17, 9,
-										1, 58, 50, 42, 34, 26, 18,
-										10, 2, 59, 51, 43, 35, 27,
-										19, 11, 3, 60, 52, 44, 36 };
 
-	const int PC_1_table_right[28] = {	63, 55, 47, 39, 31, 23, 15,
-										7, 62, 54, 46, 38, 30, 22,
-										14, 6, 61, 53, 45, 37, 29,
-										21, 13, 5, 28, 20, 12, 4 };
-
-	const int PC_2_table[48] = {14, 17, 11, 24, 1, 5,
-								3, 28, 15, 6, 21, 10,
-								23, 19, 12, 4, 26, 8,
-								16, 7, 27, 20, 13, 2,
-								41, 52, 31, 37, 47, 55,
-								30, 40, 51, 45, 33, 48,
-								44, 49, 39, 56, 34, 53,
-								46, 42, 50, 36, 29, 32 };
-
-	const int shift_table[16] = { 1, 1, 2, 2, 2, 2, 2, 2,
-								  1, 2, 2, 2, 2, 2, 2, 1 };
-
-	uint64_t left_half = 0x0;
-	uint64_t right_half = 0x0;
-
-	uint64_t merge;
-	uint64_t result;
-
-	/* Left half 28 bits */
-	int i;
-	for (i = 0; i < 28; i++)
-	{
-		if (key & ((uint64_t)1U << (64 - PC_1_table_left[i])))
-			left_half |= (uint64_t)1U << (27 - i);
-	}
-
-	/* Right half 28 bits*/
-	for (i = 0; i < 28; i++)
-	{
-		if (key & ((uint64_t)1U << (64 - PC_1_table_right[i])))
-			right_half |= (uint64_t)1U << (27 - i);
-	}
-
-	/* 16 rounds for 16 subkeys */
-	for (i = 0; i < 16; i++)
-	{
-		/* Rotate left_half and right_half "n" bits left */
-		int j;
-		for (j = 0; j < shift_table[i]; j++)
-		{
-			left_half = (((left_half << 1) & (uint64_t)0xfffffff) | (left_half >> 27));
-			right_half = (((right_half << 1) & (uint64_t)0xfffffff) | (right_half >> 27));
-		}
-
-		/* merge and permute */
-		merge = (left_half << 28) | right_half;
-		result = 0x0;
-		/* PC-2 */
-		for (j = 0; j < 48; j++)
-		{
-			if (merge & ((uint64_t)1U << (56 - PC_2_table[j])))
-				result |= (uint64_t)1U << (47 - j);
-		}
-		subkey[i] = result;
-	}
-
-}
-
-uint64_t DES_Encrypt(uint64_t text_block, uint64_t key)
+uint64_t DES_Encrypt_Block(uint64_t text_block, uint64_t key)
 {
 
 	uint64_t subkey[16];
@@ -145,7 +73,7 @@ uint64_t DES_Encrypt(uint64_t text_block, uint64_t key)
 	uint32_t left_half;
 	uint32_t right_half;
 	uint64_t temp;
-	int i;
+	size_t i;
 
 	/* Subkey generation */
 	GenSubkey(key, subkey);
@@ -174,21 +102,21 @@ uint64_t DES_Encrypt(uint64_t text_block, uint64_t key)
 
 }
 
-uint64_t DES_Decrypt(uint64_t cypher_block, uint64_t key)
+uint64_t DES_Decrypt_Block(uint64_t cyphertext, uint64_t key)
 {
 	uint64_t subkey[16];
 	uint64_t permuted_block;
 	uint32_t left_half;
 	uint32_t right_half;
 	uint64_t temp;
-	int i;
+	size_t i;
 
 	/* Subkey generation */
 	GenSubkey(key, subkey);
 
 
 	/* Initial Permutation */
-	permuted_block = InitPermutation(cypher_block);
+	permuted_block = InitPermutation(cyphertext);
 
 	/* initialize left and right half block*/
 	left_half = (uint32_t)(permuted_block >> 32);
@@ -207,6 +135,86 @@ uint64_t DES_Decrypt(uint64_t cypher_block, uint64_t key)
 
 	/* Final Permutation */
 	return FinalPermutation(temp);
+
+}
+
+
+/**
+ *	DES encryption
+ *	@param text must be already padded to a multiple of 8 bytes
+ *	@param key must always be 8 bytes
+ */
+void DES_Encrypt(uint8_t *text, 
+				size_t textLength, 
+				uint8_t *key,
+				size_t keyLength,
+				uint8_t *result)
+{
+	uint64_t tmpResult;
+	uint64_t tmpText_64;
+	uint64_t tmpKey_64;
+
+	size_t i;
+	
+
+	if( textLength % 8 != 0)
+	{
+		/* Invalid text length */
+		return ;
+	}
+	if( keyLength != 8)
+	{
+		/* Invalid key length */
+		return ;
+	}
+	
+	ByteArray_to_uint64(key, &tmpKey_64);
+	for(i = 0; i < textLength/8; i++)
+	{
+		ByteArray_to_uint64(text + 8*i, &tmpText_64);
+		tmpResult = DES_Encrypt_Block(tmpText_64, tmpKey_64);
+		uint64_to_ByteArray(tmpResult, result + 8*i);
+	}
+
+}
+
+
+/**
+ *	DES decryption
+ *	@param ciphertext must be a multiple of 8 bytes
+ *	@param key must always be 8 bytes
+ */
+void DES_Decrypt(uint8_t *ciphertext, 
+				size_t textLength, 
+				uint8_t *key,
+				size_t keyLength,
+				uint8_t *result)
+{
+	uint64_t tmpResult;
+	uint64_t tmpText_64;
+	uint64_t tmpKey_64;
+
+	size_t i;
+	
+
+	if( textLength % 8 != 0)
+	{
+		/* Invalid ciphertext length */
+		return ;
+	}
+	if( keyLength != 8)
+	{
+		/* Invalid key length */
+		return ;
+	}
+	
+	ByteArray_to_uint64(key, &tmpKey_64);
+	for(i = 0; i < textLength/8; i++)
+	{
+		ByteArray_to_uint64(ciphertext + 8*i, &tmpText_64);
+		tmpResult = DES_Decrypt_Block(tmpText_64, tmpKey_64);
+		uint64_to_ByteArray(tmpResult, result + 8*i);
+	}
 
 }
 
@@ -343,3 +351,99 @@ uint64_t FinalPermutation(uint64_t input)
 
 	return result;
 }
+
+
+void GenSubkey(uint64_t key, uint64_t subkey[16])
+{
+	/* PC-1 */
+	/* only the 56 bits of the 64 bits of key is used */
+	/* (8, 16, 24, 32, 40, 48, 56, 64) bits were specified for use as parity bits */
+	const int PC_1_table_left[28] = {	57, 49, 41, 33, 25, 17, 9,
+										1, 58, 50, 42, 34, 26, 18,
+										10, 2, 59, 51, 43, 35, 27,
+										19, 11, 3, 60, 52, 44, 36 };
+
+	const int PC_1_table_right[28] = {	63, 55, 47, 39, 31, 23, 15,
+										7, 62, 54, 46, 38, 30, 22,
+										14, 6, 61, 53, 45, 37, 29,
+										21, 13, 5, 28, 20, 12, 4 };
+
+	const int PC_2_table[48] = {14, 17, 11, 24, 1, 5,
+								3, 28, 15, 6, 21, 10,
+								23, 19, 12, 4, 26, 8,
+								16, 7, 27, 20, 13, 2,
+								41, 52, 31, 37, 47, 55,
+								30, 40, 51, 45, 33, 48,
+								44, 49, 39, 56, 34, 53,
+								46, 42, 50, 36, 29, 32 };
+
+	const int shift_table[16] = { 1, 1, 2, 2, 2, 2, 2, 2,
+								  1, 2, 2, 2, 2, 2, 2, 1 };
+
+	uint64_t left_half = 0x0;
+	uint64_t right_half = 0x0;
+
+	uint64_t merge;
+	uint64_t result;
+
+	/* Left half 28 bits */
+	int i;
+	for (i = 0; i < 28; i++)
+	{
+		if (key & ((uint64_t)1U << (64 - PC_1_table_left[i])))
+			left_half |= (uint64_t)1U << (27 - i);
+	}
+
+	/* Right half 28 bits*/
+	for (i = 0; i < 28; i++)
+	{
+		if (key & ((uint64_t)1U << (64 - PC_1_table_right[i])))
+			right_half |= (uint64_t)1U << (27 - i);
+	}
+
+	/* 16 rounds for 16 subkeys */
+	for (i = 0; i < 16; i++)
+	{
+		/* Rotate left_half and right_half "n" bits left */
+		int j;
+		for (j = 0; j < shift_table[i]; j++)
+		{
+			left_half = (((left_half << 1) & (uint64_t)0xfffffff) | (left_half >> 27));
+			right_half = (((right_half << 1) & (uint64_t)0xfffffff) | (right_half >> 27));
+		}
+
+		/* merge and permute */
+		merge = (left_half << 28) | right_half;
+		result = 0x0;
+		/* PC-2 */
+		for (j = 0; j < 48; j++)
+		{
+			if (merge & ((uint64_t)1U << (56 - PC_2_table[j])))
+				result |= (uint64_t)1U << (47 - j);
+		}
+		subkey[i] = result;
+	}
+
+}
+
+
+
+void uint64_to_ByteArray(uint64_t input, uint8_t *output)
+{
+	size_t i;
+	for(i = 0; i < 8; i++)
+	{
+		output[i] = (uint8_t)(input >> (7 - i)*8);
+	}
+}
+
+void ByteArray_to_uint64(uint8_t *input, uint64_t *output)
+{
+	size_t i;
+	*output = (uint64_t)0x0;
+	for(i = 0; i < 8; i++)
+	{
+		*output |= (uint64_t)input[i] << (7 - i)*8;
+	}
+}
+

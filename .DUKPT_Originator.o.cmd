@@ -863,7 +863,9 @@ deps_/home/jasonshiao/Documents/kernel_modules/DUKPT_Key_Management_Module/DUKPT
   arch/x86/include/asm/extable.h \
   arch/x86/include/asm/uaccess_64.h \
   /home/jasonshiao/Documents/kernel_modules/DUKPT_Key_Management_Module/DES.h \
+  /home/jasonshiao/Documents/kernel_modules/DUKPT_Key_Management_Module/TDES.h \
   /home/jasonshiao/Documents/kernel_modules/DUKPT_Key_Management_Module/DUKPT.h \
+  /home/jasonshiao/Documents/kernel_modules/DUKPT_Key_Management_Module/CBC_MAC.h \
 
 /home/jasonshiao/Documents/kernel_modules/DUKPT_Key_Management_Module/DUKPT_Originator.o: $(deps_/home/jasonshiao/Documents/kernel_modules/DUKPT_Key_Management_Module/DUKPT_Originator.o)
 

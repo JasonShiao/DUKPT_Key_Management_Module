@@ -22,12 +22,17 @@ typedef struct
 
 	uint64_t AccountReg;
 
-	uint8_t KSNReg[10];		// Key Serial Number Register (59-bit + 21-bit)
-	FutureKey FKReg[21];	// Future Key Register 
-	uint64_t KeyReg[2];		// Key Register
-	uint64_t CryptoReg[2];	// Crypto Register
-	uint64_t ShiftReg;		// only right-most 21-bit should be used
+	uint8_t KSNReg[10];			// Key Serial Number Register (59-bit + 21-bit)
+	FutureKey FKReg[21];		// Future Key Register 
+	uint64_t KeyReg[2];			// Key Register
+	uint64_t CryptoReg[2];		// Crypto Register
+	uint64_t ShiftReg;			// only right-most 21-bit should be used
 	FutureKey *CurrentKeyPtr;	// Current Key Pointer (Point to element of Future Key Register)
+
+	uint64_t MACKeyReg[2];		// MAC Key Register
+	uint64_t MACResponseKeyReg[2];// MAC Key response Register
+	uint64_t DataKeyReg[2];		// Data Encrypting Key Register
+	uint64_t DataResponseKeyReg[2]; // Data Encrypting response Key Register
 
 }DUKPT_Reg;
 
